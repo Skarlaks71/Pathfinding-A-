@@ -4,21 +4,31 @@ using UnityEngine;
 
 public class GridPF : MonoBehaviour
 {
-    public bool onlyDisplayPathGizmos;
+    public bool displayGridGizmos;
     public Transform playerTransform;
     public LayerMask unwalkableMask;
     public Vector2 gridWorldSize;
     public float nodeRadius;
+    public TerrainType[] walkableRegions;
+    LayerMask walkableMask;
+    Dictionary<int, int> walkableMaskDictionary = new Dictionary<int, int>();
     Node[,] grid;
 
     float nodeDiameter;
     int gridSizeX, gridSizeY;
 
-    private void Start()
+    private void Awake()
     {
         nodeDiameter = nodeRadius * 2;
         gridSizeX = Mathf.RoundToInt(gridWorldSize.x / nodeDiameter);
         gridSizeY = Mathf.RoundToInt(gridWorldSize.y / nodeDiameter);
+
+        foreach( TerrainType region in walkableRegions)
+        {
+            walkableMask.value |= region.terrainLayer.value;
+            walkableMaskDictionary.Add((int)Mathf.Log(region.terrainLayer.value, 2), region.terrainPenalty);
+        }
+
         CreateGrid();
     }
 
@@ -38,8 +48,70 @@ public class GridPF : MonoBehaviour
             {
                 Vector3 worldPoint = worldBottomLeft + Vector3.right * (x * nodeDiameter + nodeRadius) + Vector3.forward * (y * nodeDiameter + nodeRadius);
                 bool walkable = !(Physics.CheckSphere(worldPoint, nodeRadius, unwalkableMask));
-                grid[x, y] = new Node(walkable, worldPoint, x,y);
+
+                int movementPenalty = 0;
+
+                if (walkable)
+                {
+                    Ray ray = new Ray(worldPoint + Vector3.up * 50, Vector3.down);
+                    RaycastHit hit;
+                    if(Physics.Raycast(ray, out hit, 100, walkableMask))
+                    {
+                        walkableMaskDictionary.TryGetValue(hit.collider.gameObject.layer, out movementPenalty);
+
+                    }
+                }
+
+                grid[x, y] = new Node(walkable, worldPoint, x, y, movementPenalty);
             }
+        }
+        BlurPenaltyMap(4);
+    }
+
+    void BlurPenaltyMap(int blurSize)
+    {
+        int kernelSize = blurSize * 2 + 1;
+        int kernelExtends = (kernelSize - 1) / 2;
+
+        int[,] penaltiesHorizontalPass = new int[gridSizeX, gridSizeY];
+        int[,] penaltiesVerticalPass = new int[gridSizeX, gridSizeY];
+
+        for(int y = 0; y<gridSizeY; y++)
+        {
+            for (int x = -kernelExtends; x<=kernelExtends; x++)
+            {
+                int sampleX = Mathf.Clamp(x, 0, kernelExtends);
+                penaltiesHorizontalPass[0, y] += grid[sampleX, y].movePenalty;
+            }
+
+            for(int x = 1; x < gridSizeX; x++)
+            {
+                int removeIndex = Mathf.Clamp(x - kernelExtends - 1, 0, gridSizeX);
+                int addIndex = Mathf.Clamp(x + kernelExtends, 0, gridSizeX - 1);
+
+                penaltiesHorizontalPass[x, y] = penaltiesHorizontalPass[x - 1, y] - grid[removeIndex, y].movePenalty + grid[addIndex, y].movePenalty;
+            }
+
+        }
+
+        for (int x = 0; x < gridSizeX; x++)
+        {
+            for (int y = -kernelExtends; y <= kernelExtends; y++)
+            {
+                int sampleY = Mathf.Clamp(y, 0, kernelExtends);
+                penaltiesVerticalPass[x, 0] += penaltiesHorizontalPass[x,sampleY];
+            }
+
+            for (int y = 1; y < gridSizeY; y++)
+            {
+                int removeIndex = Mathf.Clamp(y - kernelExtends - 1, 0, gridSizeY);
+                int addIndex = Mathf.Clamp(y + kernelExtends, 0, gridSizeY - 1);
+
+                penaltiesVerticalPass[x, y] = penaltiesVerticalPass[x, y -1] - penaltiesHorizontalPass[x,removeIndex] + penaltiesHorizontalPass[x,addIndex];
+                int blurredPenalty = Mathf.RoundToInt((float)penaltiesVerticalPass[x, y] / (kernelSize * kernelSize));
+                grid[x, y].movePenalty = blurredPenalty;
+            }
+
         }
     }
 
@@ -86,40 +158,34 @@ public class GridPF : MonoBehaviour
     {
         Gizmos.DrawWireCube(transform.position, new Vector3(gridWorldSize.x, 1, gridWorldSize.y));
 
-        if (onlyDisplayPathGizmos)
-        {
-            if (path != null)
-            {
-                foreach(Node n in path)
-                {
-                    if (path.Contains(n))
-                        Gizmos.color = Color.blue;
-                    Gizmos.DrawCube(n.worldPosition, Vector3.one * (nodeDiameter - .1f));
-                }
-            }
-        }
-        else
-        {
-            if (grid != null)
-            {
-                Node playerNode = NodeFromWorldPoint(playerTransform.position);
-                foreach (Node n in grid)
-                {
-                    Gizmos.color = (n.walkable) ? Color.white : Color.red;
-                    if (path != null)
-                        if (path.Contains(n))
-                            Gizmos.color = Color.blue;
-
-                    if (playerNode == n)
-                    {
-                        Gizmos.color = Color.cyan;
-                    }
-                    Gizmos.DrawCube(n.worldPosition, Vector3.one * (nodeDiameter - .1f));
-
-                }
-            }
-        }
-
         
+        if (grid != null && displayGridGizmos)
+        {
+            Node playerNode = NodeFromWorldPoint(playerTransform.position);
+            foreach (Node n in grid)
+            {
+                Gizmos.color = (n.walkable) ? Color.white : Color.red;
+                
+                if(n.movePenalty > 0)
+                {
+                    Gizmos.color = Color.green;
+                }
+                
+                if (playerNode == n)
+                {
+                    Gizmos.color = Color.cyan;
+                }
+                Gizmos.DrawCube(n.worldPosition, Vector3.one * (nodeDiameter - .1f));
+
+            }
+        }
+        
+    }
+
+    [System.Serializable]
+    public class TerrainType
+    {
+        public LayerMask terrainLayer;
+        public int terrainPenalty;
     }
 }
